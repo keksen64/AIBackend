@@ -1,10 +1,10 @@
+import org.json.JSONArray;
+import org.json.JSONObject;
 import okhttp3.*;
 import com.sun.net.httpserver.HttpServer;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpExchange;
 import org.postgresql.ds.PGSimpleDataSource;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -57,18 +57,22 @@ public class EmbeddingServer {
             String mainText = lines[3].trim();
 
             try {
-                // 🔹 1. Отправляем текст в Python на нарезку
-                List<String> chunks = splitTextInPython(mainText);
-                int splitCount = chunks.size();
+                // 🔹 1. Отправляем текст в Python на нарезку и получение токенов
+                JSONObject splitResponse = splitTextInPython(mainText);
+                JSONArray chunksArray = splitResponse.getJSONArray("chunks");
+                JSONArray tokenCountsArray = splitResponse.getJSONArray("token_counts");
+
+                int splitCount = chunksArray.length();
 
                 for (int i = 0; i < splitCount; i++) {
-                    String chunkText = "passage: " + chunks.get(i);
+                    String chunkText = "passage: " + chunksArray.getString(i);
+                    int tokenCount = tokenCountsArray.getInt(i);  // Количество токенов в этом куске
 
                     // 🔹 2. Отправляем каждую часть на эмбеддинг
                     String embedding = generateEmbedding(chunkText);
 
                     // 🔹 3. Сохраняем в БД
-                    saveEmbeddingToDatabase(docName, actualDate, state, chunkText, embedding, splitCount, i + 1);
+                    saveEmbeddingToDatabase(docName, actualDate, state, chunkText, embedding, splitCount, i + 1, tokenCount);
                 }
 
                 String response = "✅ Эмбеддинги сохранены в БД!";
@@ -83,7 +87,7 @@ public class EmbeddingServer {
             }
         }
 
-        private List<String> splitTextInPython(String text) throws IOException {
+        private JSONObject splitTextInPython(String text) throws IOException {
             OkHttpClient client = new OkHttpClient();
             RequestBody body = RequestBody.create(MediaType.parse("text/plain; charset=utf-8"), text);
             Request request = new Request.Builder().url(PYTHON_SERVER_URL + "/split_text").post(body).build();
@@ -96,15 +100,7 @@ public class EmbeddingServer {
             String responseBody = response.body().string();
             response.close();
 
-            JSONObject jsonResponse = new JSONObject(responseBody);
-            JSONArray chunksArray = jsonResponse.getJSONArray("chunks");
-
-            List<String> chunks = new ArrayList<>();
-            for (int i = 0; i < chunksArray.length(); i++) {
-                chunks.add(chunksArray.getString(i));
-            }
-
-            return chunks;
+            return new JSONObject(responseBody);  // Возвращаем JSON с chunks + token_counts
         }
 
         private String generateEmbedding(String text) throws IOException {
@@ -128,14 +124,14 @@ public class EmbeddingServer {
             return responseBody.substring(startIndex, endIndex);
         }
 
-        private void saveEmbeddingToDatabase(String docName, String actualDate, String state, String text, String embedding, int splitCount, int splitNumber) throws SQLException {
+        private void saveEmbeddingToDatabase(String docName, String actualDate, String state, String text, String embedding, int splitCount, int splitNumber, int tokenCount) throws SQLException {
             PGSimpleDataSource dataSource = new PGSimpleDataSource();
             dataSource.setUrl(DATABASE_URL);
             dataSource.setUser(DATABASE_USER);
             dataSource.setPassword(DATABASE_PASSWORD);
 
             try (Connection connection = dataSource.getConnection()) {
-                String sql = "INSERT INTO \"AISTORAGE\".documents (docname, actualdate, state, text, embedding, splitCount, splitNumber) VALUES (?, ?, ?, ?, ?::vector, ?, ?)";
+                String sql = "INSERT INTO \"AISTORAGE\".documents (docname, actualdate, state, text, embedding, splitCount, splitNumber, token_count) VALUES (?, ?, ?, ?, ?::vector, ?, ?, ?)";
                 try (PreparedStatement statement = connection.prepareStatement(sql)) {
                     statement.setString(1, docName);
                     statement.setString(2, actualDate);
@@ -144,6 +140,7 @@ public class EmbeddingServer {
                     statement.setString(5, embedding);
                     statement.setInt(6, splitCount);
                     statement.setInt(7, splitNumber);
+                    statement.setInt(8, tokenCount);
                     statement.executeUpdate();
                 }
             }
